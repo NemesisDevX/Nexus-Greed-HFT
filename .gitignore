@@ -1,0 +1,9 @@
+node_modules/
+__pycache__/
+.env
+dist/
+
+# generated artifacts — heavy media and logs stay out of the repo
+*.mp4
+*.webm
+*.log

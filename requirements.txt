@@ -1,0 +1,16 @@
+# Nexus-Greed — frozen dependency set (exact pins).
+# Core trading agent: standard library only — nothing required to run
+# `python -m nexus_greed trade`.
+
+# Server / command center (python -m nexus_greed serve):
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+# websockets powers the lite fallback server, the chaos harness, and the
+# demo recorder's CDP client.
+websockets==17.1
+# High-performance event loop (Unix only — Windows keeps stock asyncio).
+uvloop==0.21.0; sys_platform != "win32"
+# Demo recorder video transcode (python demo_recorder.py). The recorder
+# drives Chrome/Edge over raw CDP — no playwright import required — and
+# encodes with the ffmpeg binary bundled by imageio-ffmpeg.
+imageio-ffmpeg==0.6.0
