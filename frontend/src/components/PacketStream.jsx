@@ -1,21 +1,12 @@
 import { useEffect, useRef } from 'react'
 
-/**
- * PacketStream — "Flash Boys" raw wire visualizer.
- *
- * Renders a fast-scrolling hex/ASCII dump of the actual WebSocket ingress:
- * every market event is decoded into fake frame headers (timestamp, opcode,
- * length) plus real field bytes from the payload, so the tape you see IS the
- * wire — just undressed. Pure visual intimidation for the ultra-low-latency
- * story; zero cost to the trading path.
- */
+// raw-wire tape. pure theatre — zero cost to the trading path.
 
 const HEX = '0123456789abcdef'
 const rnd = (n) => (Math.random() * n) | 0
 const hexByte = () => HEX[rnd(16)] + HEX[rnd(16)]
 const hexRun = (n) => Array.from({ length: n }, hexByte).join(' ')
 
-// Cheap printable-ASCII gutter for the hex row.
 function asciiOf(str) {
   return str
     .split('')
@@ -25,11 +16,7 @@ function asciiOf(str) {
     .padEnd(16, '.')
 }
 
-/**
- * Turn one wire event into terminal-looking dump lines.
- * Header line carries ts/opcode/len; body lines are 16-byte rows where the
- * right gutter embeds real field text (resource, regime, price) from the fill.
- */
+// one event -> fake frame header + 16-byte rows; gutter embeds real fill fields
 function dumpEvent(ev) {
   const lines = []
   const t = (performance.now() * 1000) | 0
@@ -53,9 +40,7 @@ export default function PacketStream({ event }) {
   const linesRef = useRef([])
   const pendingRef = useRef([])
 
-  // Fold each new event into the pending line queue — no React re-render per
-  // frame; the interval below does the painting, so the stream scrolls at a
-  // constant terminal cadence even if React batches.
+  // queue lines, don't re-render per event — interval below paints
   useEffect(() => {
     if (event) pendingRef.current.push(...dumpEvent(event))
     if (pendingRef.current.length > 400) {
@@ -67,8 +52,8 @@ export default function PacketStream({ event }) {
     const id = setInterval(() => {
       const el = boxRef.current
       if (!el) return
-      // Burn 3 queued lines per 45ms tick; fabricate heartbeat rows when the
-      // queue drains so the tape never visibly stalls.
+      // FIXME: fabricating idle rows when the queue drains is a hack,
+      // but a stalling tape looks worse than a fake one
       for (let i = 0; i < 3; i++) {
         const line = pendingRef.current.shift()
           || `  0x${hexByte()}${hexByte()}${hexByte()}`.toUpperCase()

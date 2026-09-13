@@ -1,8 +1,3 @@
-/**
- * PnLCounter — large animated unrealized P&L counter. Glows green when
- * profitable, red when in drawdown. The number tweens toward the target each
- * frame for a "ticking up" hedge-fund-dashboard feel.
- */
 export default function PnLCounter({ ledger }) {
   if (!ledger) {
     return (

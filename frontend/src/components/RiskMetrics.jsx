@@ -1,11 +1,3 @@
-/**
- * RiskMetrics — institutional risk strip for the command center.
- *
- * Cards: historical VaR(95) on the tick equity curve, annualized Sharpe,
- * the predatory engine's Squeeze counter (counterparties forced across our
- * +300% walls), completed cornering sweeps, and the live OBI of the
- * scarcest instrument on the wire.
- */
 export default function RiskMetrics({ ledger, quotes }) {
   if (!ledger) {
     return (
@@ -15,7 +7,7 @@ export default function RiskMetrics({ ledger, quotes }) {
     )
   }
 
-  // Live OBI of the tightest book — the instrument most exposed to a squeeze.
+  // OBI on the tightest book = the name most likely to get squeezed next
   let tightest = null
   if (quotes) {
     for (const r of Object.values(quotes)) {

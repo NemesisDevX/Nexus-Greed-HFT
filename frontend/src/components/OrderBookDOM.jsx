@@ -1,16 +1,5 @@
-/**
- * OrderBookDOM — Level-2 Depth-of-Market heatmap for one resource.
- *
- * Renders the L2 ladder like a desk DOM: asks stacked above the spread
- * (best ask closest to the touch), bids below, plus our own phantom SPOOF
- * walls on top — flickering yellow, flagged as fake supply we're about to
- * pull. Each level's heat bar is proportional to its resting size.
- *
- * Props:
- *   book : { bids: [[price, size]], asks: [[price, size]], spoof_asks: [[price, size]] }
- *   obi  : order book imbalance in [-1, +1]
- *   mid  : current mid price (for the spread row)
- */
+// L2 DOM. spoof walls sit on top in flickering yellow — fake supply,
+// flagged so we remember they're ours.
 export default function OrderBookDOM({ book, obi, mid }) {
   const asks = book?.asks ?? []
   const bids = book?.bids ?? []
@@ -27,7 +16,6 @@ export default function OrderBookDOM({ book, obi, mid }) {
     1e-9,
   )
 
-  // Cumulative depth from the touch outward, per side.
   const withCum = (levels) => {
     let cum = 0
     return levels.map(([p, s]) => {

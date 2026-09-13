@@ -1,17 +1,5 @@
-"""Zero-dependency streaming server for Nexus-Greed.
-
-Same wire protocol as ``server.py`` (FastAPI) but built on pure-Python
-``websockets`` + the stdlib — for locked-down environments where compiled
-wheels (pydantic/greenlet) can't load, and as a minimal-footprint demo path.
-
-Serves on a single port:
-    WS  /ws          — broadcast stream + bidirectional order ingress
-    GET /            — health check
-    GET /api/status  — latest state snapshot
-    GET /demo        — built-in dashboard (nexus_greed/static/dashboard.html)
-
-Architecture is identical to the FastAPI path: trading thread -> MarketEventBus
--> broadcaster -> per-client queues -> 50ms send cadence, freshest-frame-wins.
+"""Pure-websockets streamer — same wire protocol as server.py, no compiled
+deps. WS /ws (stream + order ingress), GET /, /api/status, /demo.
 """
 from __future__ import annotations
 
@@ -39,8 +27,6 @@ _HTML = {"Content-Type": "text/html; charset=utf-8",
 
 
 async def _ws_handler(ws: Any, bus: MarketEventBus, order_sink: Any) -> None:
-    """One connection: drains its queue at STREAM_INTERVAL cadence while a
-    reader coroutine accepts inbound order flow on the same socket."""
     q = bus.subscribe()
     stop = asyncio.Event()
     last_payload: Optional[str] = None
@@ -64,7 +50,7 @@ async def _ws_handler(ws: Any, bus: MarketEventBus, order_sink: Any) -> None:
                                    float(msg.get("price", 0) or 0))
                     except (TypeError, ValueError):
                         continue
-        except Exception:  # noqa: BLE001 - client vanished
+        except Exception:  # noqa: BLE001 — client vanished
             pass
         finally:
             stop.set()
@@ -72,22 +58,16 @@ async def _ws_handler(ws: Any, bus: MarketEventBus, order_sink: Any) -> None:
     reader = asyncio.create_task(order_reader())
     try:
         while not stop.is_set():
-            # Queue items are pre-serialized payloads (see MarketEventBus) —
-            # drain to the freshest frame and send it verbatim.
             payload = last_payload
             while not q.empty():
-                payload = q.get_nowait()
+                payload = q.get_nowait()  # freshest wins
             if payload is not None:
                 await ws.send(payload)
                 last_payload = payload
-            # Adaptive cadence: at massive fanout a single asyncio loop cannot
-            # sustain 20 sends/s per connection. Scale the interval with
-            # subscriber count so 10k agents each get ~1 update/s — fresher
-            # than a stalled socket, bounded memory, and the producer never
-            # blocks. Interactive dashboards (few conns) stay at 50ms.
+            # scale the send rate with fanout or one loop drowns at 10k conns
             await asyncio.sleep(
                 max(STREAM_INTERVAL, bus.subscriber_count * 1e-4))
-    except Exception:  # noqa: BLE001 - disconnects are routine under chaos
+    except Exception:  # noqa: BLE001 — drops are routine under churn
         pass
     finally:
         stop.set()
@@ -97,8 +77,7 @@ async def _ws_handler(ws: Any, bus: MarketEventBus, order_sink: Any) -> None:
 
 def _respond(connection: Any, status: int, text: str,
              headers: Dict[str, str]):
-    # websockets>=17 `respond()` takes no `headers` kwarg — mutate the
-    # returned Response's headers mapping instead.
+    # websockets>=17: respond() has no headers kwarg — mutate after
     resp = connection.respond(status, text)
     for k, v in headers.items():
         resp.headers[k] = v
@@ -126,10 +105,8 @@ def _make_process_request(get_state: Any, dash_html: bytes):
 
 def run_lite_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                     port: int = 8000, seed: Optional[int] = None) -> None:
-    """Start the trading thread + pure-websockets server on the asyncio loop."""
     from websockets.asyncio.server import serve
 
-    # uvloop where available (Unix); Windows keeps the stock loop.
     try:
         import uvloop
         uvloop.install()
@@ -141,9 +118,7 @@ def run_lite_server(cfg: StrategyConfig, host: str = "127.0.0.1",
 
     async def main() -> None:
         loop = asyncio.get_running_loop()
-        # Small subscriber queues: at 10k-fanout each frame is ~4KB, so a deep
-        # per-conn backlog would balloon memory. maxsize=8 keeps the worst
-        # case at ~320MB across 10k conns and always delivers freshest frames.
+        # ~4KB frames x 10k conns: deep queues would OOM us
         bus = MarketEventBus(loop, max_queue=8)
         formatter = StreamFormatter()
         latest: Dict[str, Any] = {"state": {}}
@@ -154,10 +129,8 @@ def run_lite_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                     fills: list) -> None:
             event = formatter.build(snapshot, ledger, fills)
             pub_skip[0] += 1
-            # Massive-fanout throttle: past ~2k subscribers the per-conn
-            # cadence is already >=0.2s, so broadcasting every tick only
-            # burns loop CPU on frames nobody can consume. ~5Hz keeps the
-            # feed alive and frees the loop to accept handshakes.
+            # past ~2k subs, per-conn cadence is already >=0.2s — broadcasting
+            # every tick just burns loop CPU on frames nobody can consume
             if bus.subscriber_count <= 2000 or pub_skip[0] % 3 == 0:
                 bus.publish(event)
 
@@ -184,10 +157,7 @@ def run_lite_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                                           name="nexus-trading")
         trading_thread.start()
 
-        # max_queue bounds the per-connection inbound buffer; compression is
-        # disabled — at 10k-fanout, permessage-deflate dominates CPU.
-        # backlog + open_timeout are raised so a connect storm (chaos test
-        # ramping thousands of agents) isn't dropped while the loop is busy.
+        # no permessage-deflate — it eats the loop alive at scale
         async with serve(handler, host, port,
                          process_request=_make_process_request(get_state, dash_html),
                          compression=None, max_queue=32,

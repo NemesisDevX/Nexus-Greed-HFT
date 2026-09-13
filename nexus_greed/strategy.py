@@ -1,47 +1,9 @@
-"""Epsilon-Greedy RL bidding engine + Predatory Liquidity Engine.
+"""Policy engine. Three regimes, priority order:
 
-Two coupled decision layers:
+  manip FSM (SPOOF->CANCEL->DIP->DISTRIBUTE) > cornering (sat<18% =>
+  sweep+wall ladder) > epsilon-greedy z-score arb (OBI-tilted trigger)
 
-1. **Predatory Liquidity Engine (dominant regime).** Every tick the agent
-   reads the Level-2 book and computes real-time Order Book Imbalance (OBI):
-
-       OBI = (bid_depth - ask_depth) / (bid_depth + ask_depth)   in [-1, +1]
-
-   When market saturation collapses below the scarcity threshold (18% of
-   venue capacity), the engine executes a **Market Cornering** sequence:
-
-     a. SWEEP -- a single aggressive marketable order that lifts all
-        remaining ask-side depth, removing the last visible liquidity.
-     b. SQUEEZE -- a ladder of passive Limit Sell walls posted at a +300%
-        markup over fair value. Competing agents whose workloads still need
-        the resource are forced to cross our walls at the squeeze price.
-
-   Each wall fill is counted as one squeezed counterparty.
-
-2. **Market Manipulation (spoof & layering).** On liquid books the engine
-   periodically posts massive out-of-the-money phantom sell walls
-   (SPOOFING). The fake supply drags the tape down; when the dip matures the
-   walls are pulled (CANCEL) and the depressed book is swept (DIP buy).
-   During the post-spoof demand frenzy the inventory is resold at a +400%
-   markup (DISTRIBUTE).
-
-3. **Epsilon-Greedy RL layer (default regime).** Per-resource tabular
-   Q-values for the aggressive BUY/SELL actions, updated by EMA toward
-   shaped rewards. With probability epsilon the agent fires a small probe
-   order to gather signal; otherwise it exploits the z-score arbitrage
-   signal, tilted by live OBI (a bid-heavy book lowers the effective
-   z-threshold to buy; an offer-heavy book raises it).
-
-Reward shaping:
-  * Arbitrage buys below the moving average are rewarded on reversion.
-  * CORNER sweeps are rewarded against their expected exit at the wall
-    price (mid * markup), not the current mid -- the sweep is justified by
-    the squeeze, not by reversion.
-  * SQUEEZE walls rewarded by realized markup over fair value.
-
-This is a mock RL loop -- no neural net, just tabular Q-updates with an
-exponential moving average. That is enough to demonstrate adaptive bidding
-behaviour for the hackathon without a training pipeline.
+Tabular Q, EMA updates — no net, no pipeline, fast enough.
 """
 from __future__ import annotations
 
@@ -59,25 +21,24 @@ from .market_client import Quote, SharedOSMarketClient
 class ResourceState:
     price_history: Deque[float] = field(default_factory=lambda: deque(maxlen=64))
     obi_history: Deque[float] = field(default_factory=lambda: deque(maxlen=64))
-    q_buy: float = 0.0      # estimated value of an aggressive BUY action
-    q_sell: float = 0.0     # estimated value of an aggressive SELL action
+    q_buy: float = 0.0
+    q_sell: float = 0.0
     last_buy_tick: int = -1
     last_buy_price: float = 0.0
-    # --- Market-manipulation state machine --------------------------------
-    manip_state: str = "IDLE"   # "IDLE" | "SPOOFING" | "DISTRIBUTE"
-    spoof_ticks_left: int = 0   # phantom walls rest this many more ticks
-    dist_ticks_left: int = 0    # squeeze-distribution window remaining
-    spoof_cooldown: int = 0     # ticks until this resource can be spoofed again
+    # manip FSM
+    manip_state: str = "IDLE"   # IDLE | SPOOFING | DISTRIBUTE
+    spoof_ticks_left: int = 0
+    dist_ticks_left: int = 0
+    spoof_cooldown: int = 0
 
 
 @dataclass
 class BidIntent:
-    """A signed trading intention produced by the strategy."""
     resource: str
-    side: str               # "BUY" | "SELL" | "HOLD" | "SPOOF" | "CANCEL"
+    side: str               # BUY|SELL|HOLD|SPOOF|CANCEL
     size: float
     limit_price: float
-    rationale: str          # human-readable reason, logged to console
+    rationale: str
     exploring: bool = False
     regime: str = "ARB"     # ARB|CORNER|SQUEEZE|EXPLORE|SPOOF|CANCEL|DIP|HOLD
 
@@ -90,10 +51,9 @@ class EpsilonGreedyStrategy:
         self.state: Dict[str, ResourceState] = {r: ResourceState() for r in TRADED_RESOURCES}
 
     # ------------------------------------------------------------------ #
-    # Signal extraction
+    # signal
     # ------------------------------------------------------------------ #
     def _rolling_stats(self, resource: str) -> Tuple[float, float]:
-        """Return (moving_average, std) of recent mid-prices."""
         hist = list(self.state[resource].price_history)
         n = len(hist)
         if n < 2:
@@ -110,10 +70,10 @@ class EpsilonGreedyStrategy:
         return (price - mean) / std
 
     # ------------------------------------------------------------------ #
-    # Q-learning update (tabular, exponential moving average)
+    # tabular Q, EMA
     # ------------------------------------------------------------------ #
     def _update_q(self, resource: str, reward: float, side: str) -> None:
-        alpha = 0.15  # learning rate
+        alpha = 0.15
         st = self.state[resource]
         if side == "BUY":
             st.q_buy = (1 - alpha) * st.q_buy + alpha * reward
@@ -121,48 +81,38 @@ class EpsilonGreedyStrategy:
             st.q_sell = (1 - alpha) * st.q_sell + alpha * reward
 
     def _reward_buy(self, resource: str, quote: Quote) -> float:
-        """Reward = how far below fair value we bought (reversion upside)."""
         mean, _ = self._rolling_stats(resource)
         if mean <= 0:
             return 0.0
-        return (mean - quote.best_ask) / mean  # positive when we bought cheap
+        return (mean - quote.best_ask) / mean
 
     def _reward_sell(self, resource: str, fill_price: float, quote: Quote) -> float:
-        """Reward = realized markup over fair value."""
         if quote.mid_price <= 0:
             return 0.0
         return (fill_price - quote.mid_price) / quote.mid_price
 
     # ------------------------------------------------------------------ #
-    # Decision making
+    # decide
     # ------------------------------------------------------------------ #
     def observe(self, snapshot: Dict[str, Quote]) -> None:
         for r, q in snapshot.items():
             self.state[r].price_history.append(q.mid_price)
             self.state[r].obi_history.append(q.obi)
-            # Close out the previous buy's reward using the new mid-price.
             st = self.state[r]
             if st.last_buy_tick >= 0 and q.last_tick - st.last_buy_tick >= 1:
-                # Pseudo-reward: did the price revert up since we bought?
+                # settle last buy's reward on reversion
                 reversion = (q.mid_price - st.last_buy_price) / max(st.last_buy_price, 1e-9)
                 self._update_q(r, reversion, "BUY")
                 st.last_buy_tick = -1
 
     # ------------------------------------------------------------------ #
-    # Predatory Liquidity Engine
+    # cornering
     # ------------------------------------------------------------------ #
     def _cornering_intents(self, resource: str, q: Quote, inv: float,
                            cash: float, st: ResourceState) -> List[BidIntent]:
-        """Market Cornering sequence for one scarce resource.
-
-        a. SWEEP -- lift all remaining ask-side depth in one marketable order.
-        b. SQUEEZE -- post a ladder of Limit Sell walls at the hoard markup
-           so competing agents must cross our price to get the resource.
-        """
         out: List[BidIntent] = []
 
-        # a. SWEEP — buy out all remaining depth, bounded by position cap
-        #    and the per-sweep cash budget.
+        # SWEEP: lift what's left of the book
         headroom = max(0.0, self.cfg.max_position_per_resource - inv)
         affordable = (cash * self.cfg.cornering_cash_fraction) / q.best_ask if q.best_ask > 0 else 0.0
         sweep_size = min(q.supply * self.cfg.sweep_depth_fraction, headroom, affordable)
@@ -170,7 +120,7 @@ class EpsilonGreedyStrategy:
         if sweep_size >= self.cfg.min_trade_size:
             out.append(BidIntent(
                 resource=resource, side="BUY", size=sweep_size,
-                limit_price=q.best_ask * 1.02,  # cross the spread, take the book
+                limit_price=q.best_ask * 1.02,
                 rationale=f"CORNER sweep: lifted {sweep_size:.1f} depth "
                           f"(sat={q.market_saturation:.0%} obi={q.obi:+.2f})",
                 regime="CORNER",
@@ -179,7 +129,7 @@ class EpsilonGreedyStrategy:
             st.last_buy_tick = q.last_tick
             st.last_buy_price = q.best_ask
 
-        # b. SQUEEZE — laddered Limit Sell walls at markup * (1 + lvl*step).
+        # SQUEEZE: pin the exit with a wall ladder
         if post_sweep_inv >= self.cfg.min_trade_size:
             out.extend(self._wall_intents(resource, q, post_sweep_inv,
                                         self.cfg.hoard_markup))
@@ -192,7 +142,6 @@ class EpsilonGreedyStrategy:
 
     def _wall_intents(self, resource: str, q: Quote, inv: float,
                       markup: float) -> List[BidIntent]:
-        """Laddered Limit Sell walls at `markup` × mid, stepped per level."""
         levels = max(1, self.cfg.squeeze_wall_levels)
         wall_budget = inv * self.cfg.hoard_max_fraction
         per_wall = max(self.cfg.min_trade_size, wall_budget / levels)
@@ -210,18 +159,10 @@ class EpsilonGreedyStrategy:
         return out
 
     # ------------------------------------------------------------------ #
-    # Market Manipulation: spoof & layering state machine
+    # spoof machine
     # ------------------------------------------------------------------ #
     def _manipulate(self, r: str, q: Quote, inv: float, cash: float,
                     st: ResourceState) -> List[BidIntent]:
-        """SPOOF -> CANCEL -> DIP -> DISTRIBUTE cycle for one resource.
-
-        SPOOFING   : phantom walls rest on the book, dragging the tape down.
-        cancel tick: pull every wall (CANCEL), then sweep the depressed book
-                     with a DIP buy before the rebound.
-        DISTRIBUTE : during the post-spoof frenzy, resell the dip inventory
-                     at the spoof_markup (+400%) via squeeze walls.
-        """
         if st.manip_state == "SPOOFING":
             st.spoof_ticks_left -= 1
             if st.spoof_ticks_left > 0:
@@ -229,8 +170,7 @@ class EpsilonGreedyStrategy:
                                   limit_price=0.0,
                                   rationale=f"SPOOF resting ({st.spoof_ticks_left}t)",
                                   regime="HOLD")]
-            # FLASH CRASH EXPLOIT — buy the panic dip *before* the walls are
-            # pulled, so the fill prints at the spoof-depressed ask.
+            # dip first, pull walls second — fill prints at the depressed ask
             intents: List[BidIntent] = []
             dip_size = min(
                 q.supply * self.cfg.sweep_depth_fraction,
@@ -255,7 +195,7 @@ class EpsilonGreedyStrategy:
             st.dist_ticks_left = self.cfg.spoof_frenzy_ticks
             return intents
 
-        # DISTRIBUTE — resell the dip-bought inventory at +400%.
+        # DISTRIBUTE: dump the dip inventory at +400%
         st.dist_ticks_left -= 1
         if inv >= self.cfg.min_trade_size:
             out = self._wall_intents(r, q, inv, self.cfg.spoof_markup)
@@ -269,12 +209,8 @@ class EpsilonGreedyStrategy:
 
     def _maybe_start_spoof(self, r: str, q: Quote, cash: float,
                            st: ResourceState) -> List[BidIntent] | None:
-        """Decide whether to launch a fresh spoof cycle on an idle resource.
-
-        Preconditions: a liquid book (spoofing an already-thin market is
-        pointless — there's no one left to panic), no cooldown, and the
-        per-tick probability roll. Returns SPOOF intents or None.
-        """
+        # needs a liquid book (no one left to panic on a dead one),
+        # no cooldown, some cash, and the dice roll
         if not self.cfg.spoof_enabled:
             return None
         if st.spoof_cooldown > 0:
@@ -311,16 +247,13 @@ class EpsilonGreedyStrategy:
             q = snapshot[r]
             z = self._zscore(r, q.mid_price)
             obi = q.obi
-            # OBI tilts the trigger: a bid-heavy book (obi > 0) lowers the
-            # effective z so we lean into demand pressure; an offer-heavy
-            # book does the opposite.
+            # OBI tilts the trigger — lean into bid crowding
             z_eff = z - self.cfg.obi_weight * obi
             sat = q.market_saturation
             st = self.state[r]
             if st.spoof_cooldown > 0:
                 st.spoof_cooldown -= 1
 
-            # --- Market manipulation (active cycle dominates) -------------
             if st.manip_state != "IDLE":
                 manip = self._manipulate(
                     r, q, inventory.get(r, 0.0), cash_remaining, st)
@@ -329,27 +262,21 @@ class EpsilonGreedyStrategy:
                     it.size * it.limit_price for it in manip if it.side == "BUY")
                 continue
 
-            # --- Predatory regime: Market Cornering ----------------------
-            # Saturation below the scarcity floor => drain the book, then
-            # re-offer at the squeeze markup. This layer dominates epsilon
-            # exploration -- when the market is cornerable, we pounce.
+            # cornerable book beats everything else on the menu
             if sat < self.cfg.scarcity_supply_pct:
                 corner = self._cornering_intents(
                     r, q, inventory.get(r, 0.0), cash_remaining, st)
                 intents.extend(corner)
-                # Reserve the sweep's cash so later resources can't
-                # double-spend it within the same tick.
                 cash_remaining -= sum(
                     it.size * it.limit_price for it in corner if it.side == "BUY")
                 continue
 
-            # --- Spoof launch: panic a liquid book -------------------------
             spoof = self._maybe_start_spoof(r, q, cash_remaining, st)
             if spoof is not None:
                 intents.extend(spoof)
                 continue
 
-            # --- Exploration branch --------------------------------------
+            # explore
             if self._rng.random() < self.epsilon:
                 probe_size = self.cfg.min_trade_size * self._rng.randint(1, 5)
                 if self._rng.random() < 0.5 and cash_remaining > probe_size * q.best_ask:
@@ -368,10 +295,9 @@ class EpsilonGreedyStrategy:
                     ))
                 continue
 
-            # --- Exploitation branch -------------------------------------
-            # Arbitrage: price below MA => buy aggressively.
+            # exploit
             if z_eff < self.cfg.buy_z_threshold and cash_remaining > q.best_ask * self.cfg.min_trade_size:
-                conviction = min(1.0, abs(z_eff) / 3.0)  # deeper discount => bigger bid
+                conviction = min(1.0, abs(z_eff) / 3.0)
                 bid_vol = min(
                     self.cfg.max_position_per_resource - inventory.get(r, 0.0),
                     self.cfg.max_position_per_resource * conviction,
@@ -388,7 +314,6 @@ class EpsilonGreedyStrategy:
                 st.last_buy_price = q.best_ask
                 continue
 
-            # Arbitrage: price above MA and we hold inventory => sell.
             if z_eff > self.cfg.sell_z_threshold and inventory.get(r, 0.0) > 0:
                 ask_vol = min(inventory[r], self.cfg.max_position_per_resource * 0.3)
                 intents.append(BidIntent(
@@ -402,16 +327,13 @@ class EpsilonGreedyStrategy:
                                       limit_price=0.0, rationale="no edge",
                                       regime="HOLD"))
 
-        # Decay exploration rate.
         self.epsilon = max(self.cfg.epsilon_floor, self.epsilon * self.cfg.epsilon_decay)
         return intents
 
     def learn_from_fill(self, intent: BidIntent, fill_price: float, quote: Quote) -> None:
-        """Update Q-values from realized fills."""
         if intent.side == "BUY":
             if intent.regime in ("CORNER", "DIP"):
-                # A sweep/dip buy is rewarded against its expected exit at the
-                # wall price, not the current mid -- the squeeze justifies it.
+                # reward vs the wall exit, not the mid — the squeeze is the trade
                 markup = (self.cfg.spoof_markup if intent.regime == "DIP"
                           else self.cfg.hoard_markup)
                 exit_target = quote.mid_price * markup

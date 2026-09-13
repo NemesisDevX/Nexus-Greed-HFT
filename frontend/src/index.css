@@ -1,5 +1,4 @@
 :root {
-  /* Bloomberg amber + sci-fi neon palette */
   --bg: #04060a;
   --bg-2: #060912;
   --panel: #0a0e16;
@@ -10,18 +9,15 @@
   --muted: #5a7290;
   --muted-2: #3d5470;
 
-  /* Bloomberg amber/orange signature */
   --amber: #ff9e1b;
   --amber-glow: rgba(255, 158, 27, 0.5);
   --amber-dim: rgba(255, 158, 27, 0.18);
 
-  /* Neon green for profit */
   --green: #00ff9c;
   --green-bright: #5cffc4;
   --green-glow: rgba(0, 255, 156, 0.7);
   --green-glow-soft: rgba(0, 255, 156, 0.25);
 
-  /* Red for loss / hoard sells */
   --red: #ff3b5c;
   --red-glow: rgba(255, 59, 92, 0.6);
 
@@ -29,7 +25,6 @@
   --cyan: #00e0ff;
   --cyan-glow: rgba(0, 224, 255, 0.4);
 
-  /* Squeeze walls / cornering regime */
   --magenta: #ff2fd6;
   --magenta-glow: rgba(255, 47, 214, 0.55);
 
@@ -47,20 +42,15 @@ html, body, #root {
 }
 
 body {
-  /* Layered: deep void + faint grid + amber/green aurora */
   background:
-    /* faint engineering grid */
     linear-gradient(rgba(42, 74, 107, 0.06) 1px, transparent 1px) 0 0 / 32px 32px,
     linear-gradient(90deg, rgba(42, 74, 107, 0.06) 1px, transparent 1px) 0 0 / 32px 32px,
-    /* green aurora top-right */
     radial-gradient(1100px 560px at 85% -8%, rgba(0, 255, 156, 0.07), transparent 60%),
-    /* amber aurora bottom-left */
     radial-gradient(900px 500px at -5% 108%, rgba(255, 158, 27, 0.06), transparent 60%),
     var(--bg);
   position: relative;
 }
 
-/* CRT scanline overlay for the sci-fi terminal feel */
 body::after {
   content: '';
   position: fixed;
@@ -77,7 +67,6 @@ body::after {
   mix-blend-mode: multiply;
   opacity: 0.5;
 }
-/* Subtle moving scan sweep */
 body::before {
   content: '';
   position: fixed;
@@ -194,7 +183,7 @@ body::before {
   border-radius: 4px;
   padding: 18px 20px;
 }
-/* Sci-fi corner brackets */
+/* corner brackets */
 .panel::before,
 .panel::after {
   content: '';
@@ -257,7 +246,6 @@ body::before {
   letter-spacing: 1px;
   transition: color 0.3s ease, text-shadow 0.3s ease;
 }
-/* Bright neon green glow for profit */
 .pnl-value.profit {
   color: var(--green);
   text-shadow:
@@ -419,7 +407,6 @@ body::before {
   overflow-y: auto;
   padding-right: 4px;
 }
-/* Custom scrollbar */
 .log-panel::-webkit-scrollbar { width: 6px; }
 .log-panel::-webkit-scrollbar-track { background: transparent; }
 .log-panel::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
@@ -582,7 +569,7 @@ body::before {
 .dom-row.bid .dom-heat {
   background: linear-gradient(90deg, transparent, rgba(0, 255, 156, 0.45));
 }
-/* Phantom spoof walls: flickering yellow, clearly flagged as fake supply */
+/* phantom walls flicker so we know they're ours */
 .dom-spoof-zone {
   border: 1px dashed rgba(255, 231, 74, 0.35);
   border-bottom: none;
@@ -623,7 +610,6 @@ body::before {
 .dom-empty { color: var(--muted); padding: 12px 4px; }
 .feed-panel .log-panel { max-height: 380px; }
 
-/* OBI inline readout inside saturation cards */
 .sat-label .obi.pos { color: var(--magenta); }
 .sat-label .obi.neg { color: var(--cyan); }
 
@@ -641,7 +627,7 @@ body::before {
   .pnl-value { font-size: 44px; }
 }
 
-/* ================= Combat lighting — regime-driven full-screen flashes ==== */
+/* ---- combat lighting ---- */
 .war-flash {
   position: fixed; inset: 0; pointer-events: none; z-index: 2000; opacity: 0;
 }
@@ -656,7 +642,6 @@ body::before {
 @keyframes wf-amber  { 0% { opacity:.4;  background:radial-gradient(ellipse at center, rgba(255,158,27,.35), rgba(90,50,0,.45)); }  100% { opacity:0; } }
 @keyframes wf-lime   { 0% { opacity:.5;  background:radial-gradient(ellipse at center, rgba(184,255,0,.35), rgba(40,90,0,.5)); }   100% { opacity:0; } }
 
-/* Feed rows punch in instead of just appearing. */
 .log-line { animation: row-in .28s ease-out; }
 @keyframes row-in {
   0%   { background: rgba(0,255,156,.22); transform: translateX(14px); opacity: 0; }
@@ -664,7 +649,7 @@ body::before {
   100% { background: transparent; transform: none; }
 }
 
-/* Ambient menace — panels breathe, page has a slow CRT flicker. */
+/* panels breathe, slow CRT flicker */
 .panel { animation: panel-hum 4s ease-in-out infinite; }
 @keyframes panel-hum {
   50% { border-color: rgba(42,74,107,.75); box-shadow: 0 0 18px rgba(0,224,255,.05); }
@@ -675,14 +660,13 @@ body::before {
   94% { filter: brightness(1.06) hue-rotate(2deg); }
 }
 
-/* P&L pops on every tick update. */
 .pnl-value.tick { animation: pnl-pop .3s ease-out; }
 @keyframes pnl-pop {
   0% { transform: scale(1.04); filter: brightness(1.8); }
   100% { transform: scale(1); filter: none; }
 }
 
-/* ================= PacketStream — raw wire hex tape ======================= */
+/* ---- wire tape ---- */
 .packet-panel { margin-top: 12px; }
 .wire-hz {
   float: right; color: var(--muted); letter-spacing: 1px; font-size: 8px;

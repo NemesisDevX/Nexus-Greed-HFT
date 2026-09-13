@@ -93,7 +93,6 @@
   .fl.CANCEL { color:var(--amber); font-weight:600; }
   .fl.DIP { color:#b8ff00; font-weight:700; text-shadow:0 0 8px rgba(184,255,0,.5); }
 
-  /* ---- combat lighting: full-screen flashes driven by fill regimes ---- */
   #flash { position:fixed; inset:0; pointer-events:none; z-index:98; opacity:0; }
   #flash.go-red    { animation:fRed .42s ease-out; }
   #flash.go-green  { animation:fGreen .42s ease-out; }
@@ -106,36 +105,29 @@
   @keyframes fAmber  { 0%{opacity:.4;background:radial-gradient(ellipse at center,rgba(255,158,27,.35),rgba(90,50,0,.45));} 100%{opacity:0;} }
   @keyframes fLime   { 0%{opacity:.5;background:radial-gradient(ellipse at center,rgba(184,255,0,.35),rgba(40,90,0,.5));} 100%{opacity:0;} }
 
-  /* every repaint animates the heat bars in — looks like the book is
-     slamming rather than a static table */
   .drow .heat { animation:heatIn .16s ease-out; transform-origin:right; }
   @keyframes heatIn { 0%{transform:scaleX(0);opacity:.2;} 100%{transform:scaleX(1);} }
   .drow { animation:rowJolt .12s steps(2); }
   @keyframes rowJolt { 0%{opacity:.55;} 100%{opacity:1;} }
 
-  /* feed rows punch in */
   .fl { animation:rowIn .28s ease-out; }
   @keyframes rowIn { 0%{background:rgba(0,255,156,.22);transform:translateX(14px);opacity:0;}
     60%{opacity:1;} 100%{background:transparent;transform:none;} }
 
-  /* big number breathes on change */
   #pnl.tick { animation:pPop .3s ease-out; }
   @keyframes pPop { 0%{transform:scale(1.04);filter:brightness(1.8);} 100%{transform:scale(1);filter:none;} }
 
-  /* ambient menace: panels shimmer subtly, page has CRT flicker */
   .panel { animation:panelHum 4s ease-in-out infinite; }
   @keyframes panelHum { 50%{border-color:rgba(42,74,107,.75);box-shadow:0 0 18px rgba(0,224,255,.05);} }
   body { animation:crt 7s steps(14) infinite; }
   @keyframes crt { 0%,92%,100%{filter:none;} 94%{filter:brightness(1.06) hue-rotate(2deg);} }
 
-  /* war mode banner while phantom walls are live */
   #war { display:none; color:var(--yellow); border:1px solid rgba(255,231,74,.5);
     padding:5px 12px; font-size:10px; letter-spacing:3px; border-radius:3px;
     animation:flick .3s steps(2) infinite; text-shadow:0 0 12px rgba(255,231,74,.8); }
   #war.on { display:inline-block; }
   #tps { font-size:10px; color:var(--cyan); letter-spacing:1px; margin-left:12px; }
 
-  /* raw wire hex tape — "Flash Boys" visualizer */
   #tape { height:170px; overflow:hidden; margin:0; font-size:9.5px;
     line-height:1.5; white-space:pre; color:#3d8f5f;
     text-shadow:0 0 6px rgba(0,255,156,.25);
@@ -236,23 +228,19 @@ function renderDom(q) {
     bids.map(b => row(b, 'bid')).join('');
 }
 
-// --- combat lighting ----------------------------------------------------- //
-// One full-screen flash per fill regime. Rate-capped so simultaneous fills
-// stack intensity instead of strobing to white.
 const FLASH = { CORNER: 'go-red', SQUEEZE: 'go-green', SPOOF: 'go-yellow',
                 CANCEL: 'go-amber', DIP: 'go-lime' };
 const lastFlash = {};
 function flash(kind) {
   const now = performance.now();
-  if (now - (lastFlash[kind] || 0) < 120) return;   // cap ~8/s per colour
+  if (now - (lastFlash[kind] || 0) < 120) return;   // ~8/s cap per colour
   lastFlash[kind] = now;
   const el = $('flash');
   el.className = '';
-  void el.offsetWidth;                            // restart the animation
+  void el.offsetWidth;
   el.className = FLASH[kind];
 }
 
-// --- liveness meters ------------------------------------------------------ //
 let msgCount = 0, fillCount = 0;
 setInterval(() => {
   $('tps').textContent = ` ${msgCount * 2} ev/s · ${fillCount * 2} fills/s`;
@@ -269,7 +257,6 @@ function renderChart() {
   const span = Math.max(hi - lo, 1e-9);
   const cw = W / candles.length;
   const y = p => H - (p - lo) / span * H * 0.9 - H * 0.05;
-  // faint grid
   ctx.strokeStyle = 'rgba(42,74,107,.25)'; ctx.globalAlpha = 1;
   for (let g = 1; g < 5; g++) {
     ctx.beginPath(); ctx.moveTo(0, H * g / 5); ctx.lineTo(W, H * g / 5); ctx.stroke();
@@ -282,19 +269,14 @@ function renderChart() {
     ctx.beginPath(); ctx.moveTo(x + w / 2, y(c.high)); ctx.lineTo(x + w / 2, y(c.low)); ctx.stroke();
     ctx.fillRect(x, Math.min(y(c.open), y(c.close)), w, Math.max(1, Math.abs(y(c.open) - y(c.close))));
   });
-  // last-price tracer line
   const last = candles[candles.length - 1];
   ctx.globalAlpha = 1; ctx.strokeStyle = '#00e0ff'; ctx.setLineDash([4, 4]);
   ctx.beginPath(); ctx.moveTo(0, y(last.close)); ctx.lineTo(W, y(last.close)); ctx.stroke();
   ctx.setLineDash([]);
 }
-// rAF loop — the chart repaints every compositor frame so it always looks
-// alive, even between stream ticks.
 (function chartLoop() { renderChart(); requestAnimationFrame(chartLoop); })();
 
-// --- raw wire tape --------------------------------------------------------- //
-// Real events become hex rows; an interval paints 3 lines/45ms so the tape
-// scrolls at a constant terminal cadence even when the stream is bursty.
+// wire tape — events -> hex rows, painted at fixed cadence
 const HEXC = '0123456789abcdef';
 const hb = () => HEXC[(Math.random() * 16) | 0] + HEXC[(Math.random() * 16) | 0];
 const hrun = n => Array.from({ length: n }, hb).join(' ');

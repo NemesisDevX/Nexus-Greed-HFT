@@ -1,21 +1,5 @@
-"""FastAPI streaming server for Nexus-Greed.
-
-Architecture
-------------
-The trading daemon runs in a background *thread* (it uses blocking
-``time.sleep``). The FastAPI/uvicorn server runs on the main asyncio loop.
-Data crosses the thread boundary through a single ``asyncio.Queue``:
-
-    trading thread  --(call_soon_threadsafe)-->  asyncio.Queue  -->  WS clients
-
-The trading thread never touches the queue directly; it calls
-``MarketEventBus.publish()`` which schedules a non-blocking ``put_nowait`` onto
-the loop via ``loop.call_soon_threadsafe``. A broadcaster coroutine fans each
-event out to per-client queues. Each WebSocket handler drains its queue and
-sends at a fixed 50ms cadence so the frontend gets a smooth live feed.
-
-Candle aggregation (OHLC) for the TradingView charts happens here, on the
-trading-thread side of the bridge, so the wire payload is already chart-ready.
+"""FastAPI streamer. Trading daemon on a thread, uvicorn on the loop,
+one call_soon_threadsafe bridge between them.
 """
 from __future__ import annotations
 
@@ -36,7 +20,6 @@ from .strategy import BidIntent
 
 log = logging.getLogger("nexus_greed.server")
 
-# Transport-agnostic streaming core (shared with lite_server.py).
 from .streaming import (  # noqa: E402
     CANDLE_SECONDS, CHARTED_RESOURCES, STREAM_INTERVAL,
     MarketEventBus, StreamFormatter,
@@ -67,9 +50,7 @@ def create_app(bus: MarketEventBus, formatter: StreamFormatter,
 
     @app.get("/demo")
     def demo_dashboard() -> Any:
-        """Zero-dependency dashboard fallback — a self-contained page that
-        streams /ws directly, so the demo records even without the React
-        build toolchain."""
+        # zero-dep dashboard — works without the node toolchain
         from fastapi.responses import FileResponse
         html = Path(__file__).parent / "static" / "dashboard.html"
         return FileResponse(html, media_type="text/html")
@@ -82,8 +63,7 @@ def create_app(bus: MarketEventBus, formatter: StreamFormatter,
         stop = asyncio.Event()
 
         async def order_reader() -> None:
-            """Inbound channel: external agents push bids/asks on the same
-            socket — the market client drains them into the sim each tick."""
+            # same socket, inbound: foreign flow drains into the sim
             if order_sink is None:
                 return
             try:
@@ -96,7 +76,7 @@ def create_app(bus: MarketEventBus, formatter: StreamFormatter,
                                    float(msg.get("price", 0) or 0))
             except WebSocketDisconnect:
                 pass
-            except Exception:  # noqa: BLE001 - malformed frames can't kill us
+            except Exception:  # noqa: BLE001 — garbage frames don't kill us
                 pass
             finally:
                 stop.set()
@@ -104,8 +84,7 @@ def create_app(bus: MarketEventBus, formatter: StreamFormatter,
         reader = asyncio.create_task(order_reader())
         try:
             while not stop.is_set():
-                # Queue items are pre-serialized payloads (see MarketEventBus);
-                # drain to the freshest so a slow client skips stale frames.
+                # freshest frame wins
                 payload = last_payload
                 while not q.empty():
                     payload = q.get_nowait()
@@ -130,12 +109,9 @@ def create_app(bus: MarketEventBus, formatter: StreamFormatter,
 # --------------------------------------------------------------------------- #
 def run_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                port: int = 8000, seed: Optional[int] = None) -> None:
-    """Start the trading thread + uvicorn server on the main asyncio loop."""
     import uvicorn
 
-    # uvloop where available (Linux/macOS): installing the policy before
-    # asyncio.run() makes uvicorn + the event bus ride it. On Windows the
-    # import fails and we keep the stock loop.
+    # uvloop on unix; must install before asyncio.run or it does nothing
     try:
         import uvloop
         uvloop.install()
@@ -148,8 +124,6 @@ def run_server(cfg: StrategyConfig, host: str = "127.0.0.1",
         bus = MarketEventBus(loop)
         formatter = StreamFormatter()
 
-        # Shared latest-state for the /api/status endpoint (written from the
-        # trading thread via the same call_soon_threadsafe bridge).
         latest: Dict[str, Any] = {"state": {}}
         loop_ref = loop
 
@@ -157,7 +131,6 @@ def run_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                     fills: List[tuple[BidIntent, TradeFill]]) -> None:
             event = formatter.build(snapshot, ledger, fills)
             bus.publish(event)
-            # Snapshot the state for the REST endpoint, scheduled on the loop.
             def _stash():
                 latest["state"] = event
             try:
@@ -166,7 +139,7 @@ def run_server(cfg: StrategyConfig, host: str = "127.0.0.1",
                 pass
 
         agent_cfg = cfg
-        # Faster cadence for a lively live feed.
+        # nobody wants a 1.5s tape on the dashboard
         if cfg.tick_seconds >= 0.5:
             agent_cfg = StrategyConfig(
                 **{**cfg.__dict__, "tick_seconds": 0.15}
@@ -177,8 +150,6 @@ def run_server(cfg: StrategyConfig, host: str = "127.0.0.1",
         def get_state() -> Dict[str, Any]:
             return latest["state"] or {"status": "warming up"}
 
-        # External order flow (chaos agents) lands in the market client's
-        # thread-safe ingress queue, drained inside advance().
         app = create_app(bus, formatter, get_state,
                          order_sink=agent.market.inject_order)
         broadcaster_task = asyncio.create_task(bus.broadcaster())

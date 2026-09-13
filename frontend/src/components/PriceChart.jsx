@@ -1,9 +1,6 @@
 import { createChart, CrosshairMode } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 
-// Marker styling per regime. BUY = neon green up-arrow; CORNER sweep =
-// cyan up-arrow (depth lifted); SQUEEZE wall = magenta down-arrow at the
-// +300% markup; legacy HOARD = red down-arrow; ordinary ARB SELL = gold.
 function markerStyle(regime, side) {
   if (regime === 'CORNER') {
     return { color: '#00e0ff', position: 'belowBar', shape: 'arrowUp', text: 'SWEEP' }
@@ -23,15 +20,6 @@ function markerStyle(regime, side) {
   return { color: '#ffd24a', position: 'aboveBar', shape: 'circle', text: 'SELL' }
 }
 
-/**
- * PriceChart — a TradingView Lightweight Charts candlestick series for one
- * resource, with BUY / HOARD SELL order markers superimposed.
- *
- * Props:
- *   resource   : resource key, e.g. "cpu_cores"
- *   candle     : latest {time, open, high, low, close} (live-updated)
- *   markers    : full marker list for this resource [{time, side, regime, price, ...}]
- */
 export default function PriceChart({ resource, candle, markers }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -40,7 +28,6 @@ export default function PriceChart({ resource, candle, markers }) {
   const lastCandleTimeRef = useRef(0)
   const seededRef = useRef(false)
 
-  // Create the chart once.
   useEffect(() => {
     if (!containerRef.current) return
     const chart = createChart(containerRef.current, {
@@ -101,14 +88,9 @@ export default function PriceChart({ resource, candle, markers }) {
     }
   }, [resource])
 
-  // Push the live candle.
   useEffect(() => {
     if (!seriesRef.current || !candle) return
-    // The first candle we see seeds the series; subsequent calls update it.
-    // update() is cheap and runs every tick — the chart tracks the tape at
-    // stream rate, so volatility shows up live rather than batched.
     seriesRef.current.update(candle)
-    // Last-price tracer: a persistent cyan line that reprices every tick.
     if (!priceLineRef.current) {
       priceLineRef.current = seriesRef.current.createPriceLine({
         price: candle.close,
@@ -127,12 +109,10 @@ export default function PriceChart({ resource, candle, markers }) {
     }
     if (candle.time !== lastCandleTimeRef.current) {
       lastCandleTimeRef.current = candle.time
-      // A new bucket started -> scroll the view forward.
       if (chartRef.current) chartRef.current.timeScale().scrollToRealTime()
     }
   }, [candle])
 
-  // Repaint markers whenever the marker list changes.
   useEffect(() => {
     if (!seriesRef.current || !markers) return
     const styled = markers
@@ -142,12 +122,11 @@ export default function PriceChart({ resource, candle, markers }) {
         ...markerStyle(m.regime, m.side),
         text: `${m.text || markerStyle(m.regime, m.side).text} ${m.size.toFixed(0)}@${m.price.toFixed(1)}`,
       }))
-    // Lightweight Charts requires markers sorted by time ascending.
-    styled.sort((a, b) => a.time - b.time)
+    styled.sort((a, b) => a.time - b.time)  // lib wants ascending
     try {
       seriesRef.current.setMarkers(styled)
     } catch (e) {
-      // setMarkers can throw if a marker time precedes the first candle; ignore.
+      // marker before first candle throws — whatever
     }
   }, [markers, resource])
 

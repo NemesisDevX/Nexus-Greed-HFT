@@ -12,24 +12,52 @@ This is not a trading bot. It is an institutional execution stack — RL policy,
 
 ## Architecture
 
-```
-Mock Venue (L2 book · OBI · spoof-drag · external order flow)
-        │  events
-        ▼
-Execution Core (trading thread)
-  ├─ Epsilon-Greedy tabular Q-policy — OBI-tilted z-score arbitrage
-  ├─ Predatory regime — sat < 18% ⇒ CORNER sweep + SQUEEZE ladder
-  └─ Manipulation FSM — SPOOF → CANCEL → DIP → SQUEEZE+
-        │  call_soon_threadsafe
-        ▼
-Market Event Bus — serialize ONCE, fan out shared payload,
-freshest-frame-wins backpressure, adaptive per-conn cadence
-        ▼
-WebSocket Streamer — FastAPI/uvicorn + uvloop (Unix), pure-websockets
-lite server fallback; bidirectional /ws (stream down, order ingress up)
-        ▼
-Command Center — React + Lightweight Charts, L2 DOM heatmap with
-flickering phantom walls, regime-driven combat flashes, raw wire tape
+```mermaid
+flowchart LR
+    subgraph VENUE["SHARED OS VENUE · market data ingress"]
+        direction TB
+        MD["L2 quotes + depth<br/>fair value · supply shocks"]
+        EXT["foreign order flow<br/>10k agents · bids/asks"]
+        Q[(per-tick snapshot<br/>mids · ladders · OBI)]
+        MD --> Q
+        EXT -->|order ingress| MD
+    end
+
+    subgraph CORE["EXECUTION CORE · decide+route p50 ~4µs"]
+        direction TB
+        SIG["signal: z-score + OBI tilt"]
+        GATE{"regime gate"}
+        MANIP["manipulation FSM<br/>SPOOF→CANCEL→DIP→SQUEEZE+"]
+        PLE["predatory engine<br/>sat&lt;18% ⇒ sweep + 3.0× walls"]
+        RLQ["epsilon-greedy Q<br/>tabular · EMA α=0.15"]
+        RT["order router<br/>caps · cash budget"]
+        LG["ledger + risk<br/>VaR · Sharpe · latency ring"]
+        Q --> SIG --> GATE
+        GATE --> MANIP --> RT
+        GATE --> PLE --> RT
+        GATE --> RLQ --> RT
+        RT --> LG
+    end
+
+    RT ==>|fills / phantom walls| VENUE
+
+    subgraph BUS["EVENT FABRIC · asyncio + uvloop"]
+        SER["serialize once<br/>shared payload"]
+        FAN["fanout · maxsize 8<br/>freshest-frame-wins<br/>adaptive cadence"]
+        SER --> FAN
+    end
+
+    LG --> BUS
+
+    subgraph UI["COMMAND CENTER"]
+        DOM["L2 DOM · phantom walls"]
+        CHT["TradingView candles"]
+        TPE["raw wire tape"]
+        RSK["risk strip"]
+    end
+
+    FAN ==>|"WS /ws · 50ms"| UI
+    UI -.->|order ingress| EXT
 ```
 
 **Why it survives 10k TPS:** the broadcaster JSON-encodes each tick *once* and hands every subscriber the same payload; per-connection queues are shallow (8 frames) with oldest-drop so a laggy client can never stall the producer; send cadence adapts to fanout; handshakes get a 1024-deep backlog and a 60s open window. Verified live: **10,000 concurrent agent connections**, 10%/2s hard-abort churn, ~49k drop/reconnect cycles, **zero unhandled errors** — and the agent kept cornering the market the entire time.
@@ -41,7 +69,6 @@ flickering phantom walls, regime-driven combat flashes, raw wire tape
 - **Predatory Liquidity Engine.** Real-time Order Book Imbalance `(bid−ask)/(bid+ask)` on a synthesized L2 ladder. When saturation collapses below 18%, one sweep lifts the entire offer side; three-rung walls at `mid × 3.0 × (1+0.1ℓ)` monetize the corner while the book stays starved. Every wall fill is a counterparty forced across our markup — the **Agents Squeezed** counter on the dashboard is literal.
 - **Manufactured flash crashes.** Phantom walls never fill — they exist only to be seen. Competitors read fake supply and dump; we cancel in the same tick and buy their panic. The state machine is fully instrumented: `SPOOF` → `SPOOF CANCELLED` → `DIP BOUGHT` → `SQUEEZE+` appears live in the trade feed and on the DOM as flickering yellow depth.
 - **Quant telemetry, not vibes.** The auto-generated `backtest_report.md` tear sheet reports Sharpe, Sortino, Calmar, Max Drawdown, VaR(95), sweep/spoof win-loss, and decide+route latency at p50/p95/p99 in microseconds.
-- **Proof, not promises.** `demo_recorder.py` orchestrates the entire stack — streamer, 10k-agent chaos harness, and headless-Chrome CDP screencast piped through ffmpeg — into a 90-second `ultimate_demo.mp4`. One command, deterministic, self-cleaning.
 - **Boring where it matters.** The core engine is standard-library-only Python. Every StrategyConfig knob is env-overridable. The streamer degrades gracefully (FastAPI → pure-websockets lite server) with an identical wire protocol. Churn is survived by design, not by luck.
 
 ## Run It
@@ -56,9 +83,6 @@ python -m nexus_greed serve --port 8000        # or: lite
 
 # chaos
 python tests/chaos_stress_test.py --agents 10000 --duration 90
-
-# the whole thing, filmed
-python demo_recorder.py                        # → ultimate_demo.mp4
 ```
 
 ## Honesty Note

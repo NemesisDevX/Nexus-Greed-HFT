@@ -1,13 +1,4 @@
-"""Nexus-Greed trading daemon.
-
-Owns the event loop, the agent's inventory and cash, and the profit/loss
-ledger. Each tick it:
-  1. advances the mock marketplace,
-  2. asks the strategy for bid intents,
-  3. routes them through the market client,
-  4. books fills into the ledger,
-  5. logs a one-line P&L summary to the console.
-"""
+"""Daemon: tick loop, ledger, fill routing, tear sheet."""
 from __future__ import annotations
 
 import logging
@@ -23,9 +14,7 @@ from .strategy import BidIntent, EpsilonGreedyStrategy
 
 log = logging.getLogger("nexus_greed")
 
-# A tick event callback: receives (snapshot, ledger_state dict, list of fills
-# as (intent, fill) tuples). Runs in the trading thread, so implementations
-# must be thread-safe (e.g. hand off via loop.call_soon_threadsafe).
+# fires in the trading thread — callers must bounce to the loop themselves
 TickCallback = Callable[[Dict, Dict, List[Tuple[BidIntent, TradeFill]]], None]
 
 
@@ -58,13 +47,9 @@ class NexusGreedAgent:
         self.ledger = Ledger(cash=self.cfg.starting_cash)
         self.starting_equity = self.cfg.starting_cash
         self.on_tick = on_tick
-        # Predatory engine accounting: each SQUEEZE wall fill is one
-        # counterparty forced to cross our markup; each CORNER sweep fill is
-        # one completed cornering sequence.
+        # warfare counters — one wall fill = one squeezed counterparty
         self.agents_squeezed = 0
         self.sweeps_executed = 0
-        # Manipulation accounting: phantom walls posted, dips swept, and the
-        # win/loss ledger for squeeze exits and dip rebounds.
         self.spoofs_placed = 0
         self.spoofs_cancelled = 0
         self.dips_bought = 0
@@ -72,12 +57,9 @@ class NexusGreedAgent:
         self.squeeze_losses = 0
         self.dip_wins = 0
         self.dip_losses = 0
-        # Dip fills awaiting outcome evaluation once the frenzy window closes.
         self._pending_dips: deque = deque()
-        # Rolling mark-to-market equity curve for VaR / Sharpe / drawdown.
         self._equity_curve: deque = deque(maxlen=8192)
-        # Per-tick decide+execute latency samples (microseconds).
-        self._lat_us: deque = deque(maxlen=20000)
+        self._lat_us: deque = deque(maxlen=20000)  # decide+route, µs
         self._report_written = False
 
     # ------------------------------------------------------------------ #
@@ -89,7 +71,6 @@ class NexusGreedAgent:
                 continue
             q = snap[intent.resource]
             if intent.side == "SPOOF":
-                # Phantom wall: rests on the displayed book, never fills.
                 self.market.spoof(intent.resource, intent.size,
                                   intent.limit_price,
                                   ttl=self.cfg.spoof_duration + 1)
@@ -131,8 +112,6 @@ class NexusGreedAgent:
                     )
             else:  # SELL
                 if intent.regime in ("HOARD", "SQUEEZE"):
-                    # Passive marked-up offer: only clears when the book stays
-                    # scarce and a desperate counterparty crosses our wall.
                     fill = self.market.hoard_sell(
                         intent.resource, intent.size, intent.limit_price,
                         self.cfg.scarcity_supply_pct,
@@ -158,7 +137,6 @@ class NexusGreedAgent:
     def _book_buy(self, fill: TradeFill) -> None:
         cost = fill.size * fill.price
         if cost > self.ledger.cash:
-            # Trim to affordable (shouldn't normally happen, defensive only).
             fill.size = self.ledger.cash / fill.price
             cost = self.ledger.cash
         inv = self.ledger.inventory[fill.resource]
@@ -185,13 +163,7 @@ class NexusGreedAgent:
 
     # ------------------------------------------------------------------ #
     def _risk_metrics(self, equity: float) -> Dict[str, float]:
-        """Historical VaR(95) and annualized Sharpe over the equity curve.
-
-        VaR(95) is the 5th-percentile per-tick return applied to current
-        equity -- the expected loss on a bad tick. Sharpe is the per-tick
-        mean/std of returns, annualized with the conventional sqrt(252)
-        scaling (each tick treated as one trading period).
-        """
+        # VaR95 = 5th-pctile tick return x equity; Sharpe ann. sqrt(252)
         curve = list(self._equity_curve)
         rets = [(b - a) / a for a, b in zip(curve, curve[1:]) if a > 0]
         if len(rets) < 10:
@@ -205,8 +177,7 @@ class NexusGreedAgent:
         return {"var_95": abs(var_ret) * equity, "sharpe": sharpe}
 
     def _resolve_dips(self, snapshot: Dict) -> None:
-        """Score dip buys once the post-spoof frenzy window has closed:
-        a win is a dip fill whose mid has rebounded above entry."""
+        # dip scores once the frenzy window closes; win = mid above entry
         horizon = self.cfg.spoof_frenzy_ticks
         keep = deque()
         while self._pending_dips:
@@ -231,12 +202,10 @@ class NexusGreedAgent:
         return s[min(len(s) - 1, int(p * len(s)))]
 
     def _full_metrics(self) -> Dict[str, float]:
-        """Institutional tear-sheet stats over the full equity curve."""
         curve = list(self._equity_curve)
         rets = [(b - a) / a for a, b in zip(curve, curve[1:]) if a > 0]
         m: Dict[str, float] = {"max_drawdown_pct": 0.0, "sortino": 0.0,
                                "calmar": 0.0, "sharpe": 0.0, "var_95": 0.0}
-        # Max drawdown over the whole run.
         peak, max_dd = 0.0, 0.0
         for eq in curve:
             peak = max(peak, eq)
@@ -259,7 +228,6 @@ class NexusGreedAgent:
         return m
 
     def _write_report(self) -> None:
-        """Emit backtest_report.md — the quant tear sheet."""
         snap = self.market.snapshot()
         equity = self.ledger.mark_to_market(snap)
         roi = (equity - self.starting_equity) / self.starting_equity * 100.0
@@ -339,7 +307,6 @@ class NexusGreedAgent:
         self._report_written = True
 
     def ledger_state(self, snapshot: Dict) -> Dict:
-        """Snapshot the ledger into a JSON-serializable dict for streaming."""
         equity = self.ledger.mark_to_market(snapshot)
         unreal = equity - self.ledger.cash
         roi = (equity - self.starting_equity) / self.starting_equity * 100.0
@@ -371,7 +338,6 @@ class NexusGreedAgent:
         snap = self.market.snapshot()
         equity = self.ledger.mark_to_market(snap)
         roi = (equity - self.starting_equity) / self.starting_equity * 100.0
-        # Find the tightest market right now for colour.
         tightest = min(snap.values(), key=lambda q: q.market_saturation)
         log.info(
             "TICK %04d | equity=%10.2f  cash=%9.2f  realized=%+8.2f  ROI=%+5.2f%%  "
@@ -395,8 +361,8 @@ class NexusGreedAgent:
                 intents = self.strategy.decide(snap, self.ledger.inventory, self.ledger.cash)
                 fills = self._execute(intents)
                 self._lat_us.append((time.perf_counter_ns() - t0) / 1000.0)
-                # Equity curve is owned by the tick loop itself — headless
-                # backtests need it too, not just streaming subscribers.
+                # headless runs need the curve too — keep it here, not in
+                # ledger_state() where only stream subscribers would see it
                 self._equity_curve.append(self.ledger.mark_to_market(snap))
                 self._log_summary()
                 if (not self._report_written

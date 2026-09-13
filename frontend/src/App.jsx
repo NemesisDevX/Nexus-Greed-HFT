@@ -38,8 +38,7 @@ export default function App() {
   const lastFlashRef = useRef({})
   const flashTimerRef = useRef(null)
 
-  // Full-screen combat flash per fill regime, rate-capped per colour so
-  // stacked fills intensify instead of strobing to white.
+  // flash per regime, rate-capped — uncapped it strobes to white
   useEffect(() => {
     const last = fills[fills.length - 1]
     if (!last) return

@@ -1,17 +1,11 @@
 const RESOURCES = ['cpu_cores', 'gpu_slices', 'ram_pages', 'bandwidth_mbps']
 
 function saturationColor(sat) {
-  // Low saturation (scarce) -> red; high saturation (well-supplied) -> green.
   if (sat < 0.18) return '#ff3b5c'
   if (sat < 0.4) return '#ff9e1b'
   return '#00ff9c'
 }
 
-/**
- * MarketStats — grid of per-resource quote cards with mid-price and a
- * market-saturation bar. The bar turns red when supply enters the hoarding
- * regime (< 18%), matching the agent's scarcity threshold.
- */
 export default function MarketStats({ quotes }) {
   if (!quotes) return <div className="panel"><div className="panel-title">Market Saturation</div></div>
   return (

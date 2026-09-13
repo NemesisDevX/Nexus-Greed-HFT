@@ -1,9 +1,4 @@
-"""CLI entry point for Nexus-Greed.
-
-  python -m nexus_greed trade ...      # headless trading daemon (default)
-  python -m nexus_greed serve ...      # FastAPI + WebSocket command center
-  python -m nexus_greed ...             # (no subcommand) == trade, for back-compat
-"""
+"""python -m nexus_greed {trade|serve|lite}"""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +20,6 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _strategy_config_from_args(args: argparse.Namespace) -> StrategyConfig:
-    """Build a StrategyConfig, letting CLI flags override env/config defaults."""
     base = StrategyConfig.from_env()
     overrides = {f: getattr(args, f) for f in StrategyConfig.__dataclass_fields__
                  if hasattr(args, f) and getattr(args, f) is not None}
@@ -66,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     lite.add_argument("--host", default="127.0.0.1", help="bind host")
     lite.add_argument("--port", type=int, default=8000, help="bind port")
 
-    # Back-compat: allow common flags directly on the root parser too.
+    # keep old flag style working
     add_common_args(p)
     return p
 
@@ -87,7 +81,6 @@ def main(argv: list[str] | None = None) -> int:
         run_lite_server(cfg, host=args.host, port=args.port, seed=args.seed)
         return 0
 
-    # Default / "trade": headless daemon.
     agent = NexusGreedAgent(cfg=cfg, seed=args.seed)
     agent.run()
     return 0

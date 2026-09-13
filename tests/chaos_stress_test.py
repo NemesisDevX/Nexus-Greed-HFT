@@ -1,15 +1,6 @@
-"""Chaos stress test for the Nexus-Greed streamer.
+"""Chaos harness: N agents on /ws, order flood inbound, churn kill-waves.
 
-Spawns up to 10,000 synthetic agent connections against ws://host:port/ws.
-Each connection is bidirectional: it consumes the broadcast stream AND
-floods the server with random bids/asks (the server's order-ingress reader
-drains them into the simulated market). Every --churn-interval seconds,
---churn-fraction of live connections are killed and re-established to test
-resilience and surface memory/FD leaks.
-
-Usage:
-    python tests/chaos_stress_test.py --agents 10000
-    python tests/chaos_stress_test.py --agents 500 --duration 60
+  python tests/chaos_stress_test.py --agents 10000
 """
 from __future__ import annotations
 
@@ -32,9 +23,6 @@ except ImportError:  # pragma: no cover
 
 RESOURCES = ("cpu_cores", "gpu_slices", "ram_pages", "bandwidth_mbps")
 
-# --------------------------------------------------------------------------- #
-# Shared chaos state
-# --------------------------------------------------------------------------- #
 STOP = asyncio.Event()
 live: Set = set()
 
@@ -44,14 +32,12 @@ stats = {
     "orders_out": 0,
     "reconnects": 0,
     "killed": 0,
-    "dropped": 0,   # expected churn casualties — not errors
-    "errors": 0,    # real failures worth investigating
+    "dropped": 0,   # churn casualties — routine, not errors
+    "errors": 0,    # anything else — actually interesting
 }
 
 
 async def agent_session(target: str, order_rate: float, order_frac: float) -> None:
-    """One synthetic agent: consume the stream, push random order flow.
-    Reconnects automatically on drop — runs until STOP is set."""
     rng = random.Random()
     sends_orders = rng.random() < order_frac
     while not STOP.is_set():
@@ -65,9 +51,6 @@ async def agent_session(target: str, order_rate: float, order_frac: float) -> No
                 try:
                     while not STOP.is_set():
                         if sends_orders:
-                            # Fire-and-forget order flow, then read whatever
-                            # is inbound with a short timeout so send cadence
-                            # holds even if the stream is quiet.
                             order = {
                                 "type": "order",
                                 "resource": rng.choice(RESOURCES),
@@ -86,23 +69,19 @@ async def agent_session(target: str, order_rate: float, order_frac: float) -> No
                 finally:
                     live.discard(ws)
         except ConnectionClosed:
-            stats["dropped"] += 1  # churn victim or server-side close — routine
+            stats["dropped"] += 1
         except (OSError, asyncio.IncompleteReadError, EOFError,
                 asyncio.TimeoutError, TimeoutError):
-            stats["dropped"] += 1  # connect timeouts under load — routine
-        except Exception:  # noqa: BLE001 — chaos harness must never die
+            stats["dropped"] += 1
+        except Exception:  # noqa: BLE001 — harness must never die
             stats["errors"] += 1
         if not STOP.is_set():
             await asyncio.sleep(rng.uniform(0.05, 0.4))
 
 
 async def churn(frac: float, interval: float) -> None:
-    """Every `interval` seconds, kill `frac` of live connections.
-
-    Uses transport.abort() — an instant TCP-level drop, no close handshake.
-    Awaiting ws.close() under load would block on the handshake and let the
-    kill wave fall seconds behind schedule.
-    """
+    # transport.abort() = instant RST. awaiting close() under load lags the
+    # kill wave by seconds
     rng = random.Random()
     while not STOP.is_set():
         await asyncio.sleep(interval)
@@ -141,7 +120,7 @@ async def main_async(args: argparse.Namespace) -> None:
     tasks = [asyncio.create_task(stats_loop(args.agents)),
              asyncio.create_task(churn(args.churn_fraction, args.churn_interval))]
 
-    # Ramp connections in batches to avoid a connect-storm SYN flood.
+    # batched ramp — an unthrottled 10k connect storm just SYN-floods us
     batch = 400
     for i in range(0, args.agents, batch):
         for j in range(i, min(i + batch, args.agents)):
@@ -162,7 +141,6 @@ async def main_async(args: argparse.Namespace) -> None:
     else:
         await STOP.wait()
 
-    # Graceful teardown.
     for ws in list(live):
         try:
             await ws.close()

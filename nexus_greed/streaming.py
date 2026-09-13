@@ -1,10 +1,4 @@
-"""Transport-agnostic streaming core for Nexus-Greed.
-
-Everything here is transport-independent: the asyncio event bus, the OHLC
-candle aggregator, and the wire-payload formatter. ``server.py`` (FastAPI)
-and ``lite_server.py`` (pure-websockets fallback) both build on this module
-so the wire protocol is identical regardless of which stack is serving.
-"""
+"""Bus, candles, wire format — shared by server.py and lite_server.py."""
 from __future__ import annotations
 
 import asyncio
@@ -16,24 +10,16 @@ from .config import TRADED_RESOURCES
 from .market_client import Quote, TradeFill
 from .strategy import BidIntent
 
-# Resources we render as candlestick charts on the frontend.
 CHARTED_RESOURCES = ("cpu_cores", "gpu_slices")
-# Wall-clock seconds per OHLC candle bucket.
 CANDLE_SECONDS = 1
-# WebSocket push cadence.
-STREAM_INTERVAL = 0.05  # 50ms
+STREAM_INTERVAL = 0.05
 
 
 # --------------------------------------------------------------------------- #
-# Candle aggregation
+# candles
 # --------------------------------------------------------------------------- #
 class CandleAggregator:
-    """Builds 1-second OHLC candles from the per-tick mid-price stream.
-
-    Only the two charted resources get candles; the rest are quoted raw.
-    The current (still-forming) candle is emitted every tick so the frontend
-    can call ``series.update()`` and watch the candle draw live.
-    """
+    """1s OHLC off the tick stream; forming candle re-emits every tick."""
 
     def __init__(self, resources: tuple[str, ...] = CHARTED_RESOURCES,
                  bucket_seconds: int = CANDLE_SECONDS) -> None:
@@ -65,19 +51,12 @@ class CandleAggregator:
 
 
 # --------------------------------------------------------------------------- #
-# Event bus: thread -> asyncio loop bridge
+# thread -> loop fanout
 # --------------------------------------------------------------------------- #
 class MarketEventBus:
-    """Thread-safe fan-out of market events to subscriber queues.
-
-    ``publish`` is called from the *trading thread*. It schedules a non-blocking
-    enqueue onto the asyncio loop via ``call_soon_threadsafe``. A broadcaster
-    task serializes each event to the wire format ONCE, then copies the shared
-    payload into every subscriber's queue — at 10k-fanout this avoids a
-    per-connection ``json.dumps`` which would otherwise dominate CPU. Slow
-    subscribers drop their oldest frame so a laggy client never stalls the
-    producer; they always receive the freshest event next.
-    """
+    """publish() runs on the trading thread; the broadcaster serializes once
+    and hands every sub the same payload. Full queues drop oldest — a laggy
+    client eats stale-frame loss, never the producer."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, max_queue: int = 256,
                  serialize: Callable[[Dict[str, Any]], str] = json.dumps) -> None:
@@ -87,12 +66,11 @@ class MarketEventBus:
         self._subscribers: Set[asyncio.Queue] = set()
         self._ingress: asyncio.Queue = asyncio.Queue(maxsize=max_queue)
 
-    # Called from the trading thread.
     def publish(self, event: Dict[str, Any]) -> None:
         try:
             self._loop.call_soon_threadsafe(self._safe_put, event)
         except RuntimeError:
-            pass  # loop closed during shutdown
+            pass  # loop died mid-shutdown
 
     def _safe_put(self, event: Dict[str, Any]) -> None:
         try:
@@ -135,7 +113,7 @@ class MarketEventBus:
 
 
 # --------------------------------------------------------------------------- #
-# Event formatting
+# wire format
 # --------------------------------------------------------------------------- #
 def _quote_payload(q: Quote) -> Dict[str, Any]:
     return {
@@ -170,11 +148,7 @@ def _fill_marker(intent: BidIntent, fill: TradeFill, ts: int) -> Dict[str, Any]:
 
 
 class StreamFormatter:
-    """Owns candle + marker state and produces the per-tick wire payload.
-
-    Runs entirely on the trading thread (inside the agent's on_tick callback),
-    so it has no concurrency concerns of its own.
-    """
+    """Runs on the trading thread inside on_tick — no locking needed."""
 
     def __init__(self) -> None:
         self.candles = CandleAggregator()
@@ -193,8 +167,8 @@ class StreamFormatter:
         new_fills: List[Dict[str, Any]] = []
         for intent, fill in fills:
             m = _fill_marker(intent, fill, ts)
-            new_fills.append(m)  # trade feed sees every fill, all resources
-            # Phantom orders (SPOOF/CANCEL) never hit the tape — feed only.
+            new_fills.append(m)
+            # SPOOF/CANCEL go to the feed only — they never print on the tape
             if intent.resource not in self._markers or intent.side not in ("BUY", "SELL"):
                 continue
             self._markers[intent.resource].append(m)

@@ -4,7 +4,7 @@
 
 **Nexus-Greed** is an institutional-grade quantitative execution system built for the Shared OS A2A marketplace, where CPU-cores, GPU-slices, RAM-pages, and bandwidth trade as instruments on a live order book. The system couples a **tabular Epsilon-Greedy reinforcement-learning policy** for mean-reversion arbitrage with a **Predatory Liquidity Engine** that detects order-book exhaustion and executes programmatic **Market Cornering** — sweep all remaining depth, then pin the exit with a ladder of Limit Sell walls at a **+300% markup** — and a **Market Manipulation state machine** that proactively manufactures flash crashes: it layers massive out-of-the-money spoof walls to induce panic selling, cancels them the instant competitors dump, sweeps the dip, and resells the accumulated inventory at a **+400% markup**.
 
-The stack is a zero-dependency Python execution core, a FastAPI/asyncio WebSocket streamer (with a pure-`websockets` fallback server), and a React command center styled as a Bloomberg terminal with a cyberpunk skin — TradingView Lightweight candlesticks, a Level-2 DOM heatmap with flickering spoof walls, and a live risk strip (VaR, Sharpe, squeeze counter). It ships with a **10,000-connection chaos harness** and a **self-orchestrating demo recorder** that produces a 90-second `ultimate_demo.mp4`.
+The stack is a zero-dependency Python execution core, a FastAPI/asyncio WebSocket streamer (with a pure-`websockets` fallback server), and a React command center styled as a Bloomberg terminal with a cyberpunk skin — TradingView Lightweight candlesticks, a Level-2 DOM heatmap with flickering spoof walls, a raw-wire packet visualizer, and a live risk strip (VaR, Sharpe, squeeze counter). It ships with a **10,000-connection chaos harness** and an auto-generated 1,000-tick **quant tear sheet**.
 
 ---
 
@@ -12,42 +12,60 @@ The stack is a zero-dependency Python execution core, a FastAPI/asyncio WebSocke
 
 ```mermaid
 flowchart LR
-    subgraph VENUE["Shared OS Venue (mock)"]
-        OB["L2 Order Book<br/>mean-reverting fair value<br/>supply shocks"]
+    subgraph VENUE["SHARED OS VENUE · market data ingress"]
+        direction TB
+        MD["L2 quotes + depth<br/>mean-reverting fair value<br/>supply shocks @ tick"]
+        EXT["foreign order flow<br/>10k agents · bids/asks"]
+        Q[(Snapshot per tick<br/>mids · ladders · OBI)]
+        MD --> Q
+        EXT -->|"{type:order}<br/>drained into fair value"| MD
     end
 
-    OB --> BUS["Market Event Bus<br/>asyncio.Queue ingress"]
-    BUS --> WS["WebSocket Streamer<br/>/ws · 50ms cadence"]
-    WS --> UI["React Command Center<br/>candles · L2 DOM · risk strip"]
+    subgraph CORE["EXECUTION CORE · trading thread · decide+route ~4µs p50"]
+        direction TB
+        SIG["Signal Layer<br/>z-score vs 12-tick MA<br/>OBI tilt  z_eff = z − 0.5·obi"]
+        GATE{"regime gate<br/>priority order"}
+        MANIP["MANIPULATION FSM<br/>SPOOF → CANCEL → DIP → SQUEEZE+<br/>walls @ 1.6×mid · resale @ 4.0×mid"]
+        PLE["PREDATORY ENGINE<br/>sat &lt; 18% ⇒ CORNER<br/>sweep depth → 3-rung wall ladder @ 3.0×mid"]
+        RLQ["EPSILON-GREEDY Q<br/>tabular values · EMA α=0.15<br/>probe @ ε → floor 0.02"]
+        RT["Order Router<br/>BUY/SELL · SPOOF/CANCEL<br/>position caps · cash budget"]
+        LG["Ledger + Risk<br/>mark-to-market · VaR95 · Sharpe<br/>latency ring (µs)"]
 
-    subgraph CORE["Execution Core (trading thread)"]
-        RL["RL Engine<br/>Epsilon-Greedy<br/>tabular Q-values"]
-        OBI["OBI Signal<br/>(bid−ask)/(bid+ask)"]
-        PLE{"sat < 18% ?"}
-        SWP["Market Cornering<br/>SWEEP all depth"]
-        SQZ["SQUEEZE walls<br/>mid × 3.0 ladder"]
-        ARB["Z-Score Arbitrage<br/>OBI-tilted trigger"]
-        SPOOF["SPOOF walls<br/>mid × 1.6 phantom supply"]
-        DIP["CANCEL + DIP<br/>sweep the panic"]
-        SQ4["SQUEEZE+ walls<br/>mid × 4.0"]
-
-        RL --> OBI --> PLE
-        PLE -- "yes" --> SWP --> SQZ
-        PLE -- "no" --> ARB
-        SPOOF --> DIP --> SQ4
+        Q --> SIG --> GATE
+        GATE -->|active manip cycle| MANIP
+        GATE -->|sat &lt; 18%| PLE
+        GATE -->|else| RLQ
+        MANIP --> RT
+        PLE --> RT
+        RLQ --> RT
+        RT --> LG
     end
 
-    OB --> CORE
-    SWP --> OB
-    SQZ --> OB
-    ARB --> OB
-    SPOOF -.->|phantom depth| OB
-    DIP --> OB
-    SQ4 --> OB
-    CORE -- "on_tick: quotes, candles,<br/>fills, ledger, risk" --> BUS
+    RT ==>|"fills / phantom walls"| VENUE
+
+    subgraph BUS["EVENT FABRIC · asyncio · uvloop on unix"]
+        direction TB
+        PUB["publish()<br/>call_soon_threadsafe"]
+        SER["serialize ONCE per event<br/>shared payload"]
+        FAN["fanout → per-conn queues<br/>maxsize 8 · freshest-frame-wins<br/>adaptive cadence"]
+        PUB --> SER --> FAN
+    end
+
+    LG --> PUB
+
+    subgraph UI["COMMAND CENTER · browser"]
+        direction TB
+        DOM["L2 DOM heatmap<br/>flickering phantom walls"]
+        CHT["TradingView candles<br/>+ last-price tracer"]
+        TPE["Raw Wire tape<br/>hex/ASCII order ingress"]
+        RSK["Risk strip · VaR · Sharpe<br/>Agents Squeezed"]
+    end
+
+    FAN ==>|"WS /ws · 50ms<br/>quotes+candles+fills+ledger"| UI
+    UI -.->|"order ingress"| EXT
 ```
 
-Data crosses the thread boundary once — the trading thread publishes chart-ready events (OHLC candles, L2 ladders, ledger, risk metrics) through `loop.call_soon_threadsafe` into a single ingress queue; a broadcaster fans out to per-client queues, dropping stale frames so a laggy client can never stall the feed.
+One thread boundary, crossed once: the trading thread hands chart-ready events (OHLC, L2 ladders, ledger, risk) to the loop via `call_soon_threadsafe`; the broadcaster serializes each tick once and fan-outs a shared payload. Slow clients drop stale frames — they can never stall the producer.
 
 ```
 nexus_greed/
@@ -62,7 +80,6 @@ nexus_greed/
 └── static/dashboard.html  # Zero-dependency fallback dashboard (/demo)
 
 tests/chaos_stress_test.py  # 10k-connection bidirectional chaos harness
-demo_recorder.py            # Headless-Chrome CDP recorder -> ultimate_demo.mp4
 ```
 
 ---
@@ -197,20 +214,9 @@ On Linux/macOS the FastAPI path additionally installs **uvloop** before `asyncio
 
 After 1,000 ticks the agent writes `backtest_report.md` automatically: Max Drawdown, Sharpe, Sortino, Calmar, VaR(95), sweep & spoof W/L statistics, and decide+route **latency percentiles (p50/p95/p99, microseconds)** over a 20k-sample ring. Regenerate any time with `python -m nexus_greed trade --ticks 1000`.
 
-## 5. Ultimate Auto-Demo
+## 5. How to Run Locally
 
-```bash
-python demo_recorder.py                  # 90s, 10k agents, ultimate_demo.mp4
-python demo_recorder.py --seconds 30 --agents 500
-```
-
-The recorder orchestrates the whole stack — FastAPI streamer (automatically falling back to `lite` if compiled deps are unavailable), chaos harness, and a headless Chrome/Edge driven over **raw CDP** (`Page.startScreencast` → JPEG frames piped into ffmpeg with wall-clock timestamps → CFR-30 mp4). All child processes are terminated and ports released on exit.
-
----
-
-## 6. How to Run Locally
-
-### 6.1 Headless daemon (zero dependencies, Python 3.10+)
+### 5.1 Headless daemon (zero dependencies, Python 3.10+)
 
 ```bash
 python -m nexus_greed                                   # run forever
@@ -221,7 +227,7 @@ NEXUS_OBI_WEIGHT=0.8 NEXUS_EPSILON=0.2 python -m nexus_greed trade
 
 Every `StrategyConfig` field is overridable via `NEXUS_<FIELD>` env vars. Each tick logs a compact P&L line including `squeezed=`/`sweeps=` counters; shutdown prints a full report.
 
-### 6.2 Command Center (streamer + dashboard)
+### 5.2 Command Center (streamer + dashboard)
 
 **Terminal A — Python streamer:**
 
@@ -243,7 +249,7 @@ npm run dev        # http://localhost:5173
 
 The dashboard auto-connects to `ws://127.0.0.1:8000/ws` and reconnects on drop; override with `VITE_WS_URL` if proxied.
 
-### 6.3 What you should see
+### 5.3 What you should see
 
 - **Candlesticks** for `cpu_cores` / `gpu_slices` with order markers — green ▲ `BUY`, cyan ▲ `SWEEP` (cornering), magenta ▼ `SQZ` (the +300% walls), orange ▲ `DIP` (post-spoof dip buy), gold ● `SELL`.
 - **Level-2 DOM heatmaps** — ask depth in red above the spread, bid depth in green below, and **flickering yellow phantom walls** while a SPOOF is live; watch the offer side evaporate during a sweep while OBI pins to +100%.
@@ -253,7 +259,7 @@ The dashboard auto-connects to `ws://127.0.0.1:8000/ws` and reconnects on drop; 
 
 ---
 
-## 7. Risk Disclaimer
+## 6. Risk Disclaimer
 
 Nexus-Greed is a research and demonstration system. The cornering and spoof-and-layer sequences are highly profitable against the synthetic venue because the mock's desperate-buyer model clears marked-up walls while saturation stays below the scarcity floor and honors the phantom-supply drag; on a real Shared OS market, competing liquidity would compress the premium, and spoofing/layering is prohibited conduct on regulated venues (it is included here purely to demonstrate an adversarial state machine). The strategy logic, risk controls, stress harness, and streaming architecture are nevertheless representative of a production adversarial market-making design.
 
